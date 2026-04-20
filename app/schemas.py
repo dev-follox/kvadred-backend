@@ -1,8 +1,10 @@
 import re
-from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional, List, Dict, Any
 from datetime import datetime
-from .models import OrderStatus, InviteStatus
+from typing import List, Optional
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from .models import InviteStatus, OrderStatus
 
 
 def _validate_password_strength(value: str) -> str:
@@ -24,6 +26,7 @@ def _validate_password_strength(value: str) -> str:
 
 # ─── Company ────────────────────────────────────────────────────────────────
 
+
 class CompanyBase(BaseModel):
     full_name: str
     email: EmailStr
@@ -34,6 +37,7 @@ class CompanyBase(BaseModel):
 
 class CompanyCreate(CompanyBase):
     password: str
+    default_designer_bonus_percent: float = Field(ge=0, le=100)
 
     @field_validator("password")
     @classmethod
@@ -46,6 +50,24 @@ class CompanyUpdate(BaseModel):
     phone_number: Optional[str] = None
     company_name: Optional[str] = None
     description: Optional[str] = None
+    default_designer_bonus_percent: Optional[float] = Field(default=None, ge=0, le=100)
+
+
+class Company(CompanyBase):
+    id: int
+    telegram_chat_id: Optional[str] = None
+    default_designer_bonus_percent: float
+    subscription_expires_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CompanySubscriptionAdminUpdate(BaseModel):
+    subscription_expires_at: Optional[datetime] = None
+    default_designer_bonus_percent: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class PasswordUpdate(BaseModel):
@@ -58,25 +80,15 @@ class PasswordUpdate(BaseModel):
         return _validate_password_strength(v)
 
 
-class Company(CompanyBase):
-    id: int
-    telegram_chat_id: Optional[str] = None
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-
 # ─── Product ────────────────────────────────────────────────────────────────
+
 
 class ProductBase(BaseModel):
     name: str
     description: Optional[str] = None
     price: float
-    commission_rate: float = 0.0
     image_url: Optional[str] = None
-    blogger_task_description: Optional[str] = None
+    designer_task_description: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -87,9 +99,8 @@ class ProductUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     price: Optional[float] = None
-    commission_rate: Optional[float] = None
     image_url: Optional[str] = None
-    blogger_task_description: Optional[str] = None
+    designer_task_description: Optional[str] = None
 
 
 class Product(ProductBase):
@@ -102,15 +113,16 @@ class Product(ProductBase):
         from_attributes = True
 
 
-# ─── Blogger ─────────────────────────────────────────────────────────────────
+# ─── Designer ───────────────────────────────────────────────────────────────
 
-class BloggerBase(BaseModel):
+
+class DesignerBase(BaseModel):
     name: str
     email: EmailStr
     bio: Optional[str] = None
 
 
-class BloggerCreate(BloggerBase):
+class DesignerCreate(DesignerBase):
     password: str
 
     @field_validator("password")
@@ -119,12 +131,12 @@ class BloggerCreate(BloggerBase):
         return _validate_password_strength(v)
 
 
-class BloggerUpdate(BaseModel):
+class DesignerUpdate(BaseModel):
     name: Optional[str] = None
     bio: Optional[str] = None
 
 
-class Blogger(BloggerBase):
+class Designer(DesignerBase):
     id: int
     telegram_chat_id: Optional[str] = None
     created_at: datetime
@@ -134,13 +146,14 @@ class Blogger(BloggerBase):
         from_attributes = True
 
 
-# ─── Blogger Invite ──────────────────────────────────────────────────────────
-
-class BloggerInviteCreate(BaseModel):
-    blogger_email: EmailStr
+# ─── Designer Invite ─────────────────────────────────────────────────────────
 
 
-class BloggerInviteAccept(BaseModel):
+class DesignerInviteCreate(BaseModel):
+    designer_email: EmailStr
+
+
+class DesignerInviteAccept(BaseModel):
     token: str
     name: str
     password: str
@@ -151,10 +164,10 @@ class BloggerInviteAccept(BaseModel):
         return _validate_password_strength(v)
 
 
-class BloggerInvite(BaseModel):
+class DesignerInvite(BaseModel):
     id: int
     company_id: int
-    blogger_email: str
+    designer_email: str
     token: str
     status: InviteStatus
     expires_at: datetime
@@ -164,32 +177,41 @@ class BloggerInvite(BaseModel):
         from_attributes = True
 
 
-# ─── BloggerCompany ──────────────────────────────────────────────────────────
+# ─── DesignerCompany ─────────────────────────────────────────────────────────
 
-class BloggerCompany(BaseModel):
+
+class DesignerCompany(BaseModel):
     id: int
-    blogger_id: int
+    designer_id: int
     company_id: int
+    bonus_percent_override: Optional[float] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
+class DesignerCompanyWithDesigner(DesignerCompany):
+    designer: Designer
+    effective_bonus_percent: float
+
+
+class DesignerBonusUpdate(BaseModel):
+    bonus_percent_override: Optional[float] = Field(default=None, ge=0, le=100)
+
+
 # ─── Affiliate Link ──────────────────────────────────────────────────────────
 
-class AffiliateLinkBase(BaseModel):
+
+class AffiliateLinkCreate(BaseModel):
     product_id: int
-    blogger_id: int
 
 
-class AffiliateLinkCreate(AffiliateLinkBase):
-    pass
-
-
-class AffiliateLink(AffiliateLinkBase):
+class AffiliateLink(BaseModel):
     id: int
     code: str
+    product_id: int
+    designer_id: int
     click_count: int
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -200,17 +222,28 @@ class AffiliateLink(AffiliateLinkBase):
 
 class AffiliateLinkDetail(AffiliateLink):
     product: Product
-    blogger: Blogger
+    designer: Designer
 
     class Config:
         from_attributes = True
 
 
+class AffiliateLinkWithRollup(AffiliateLinkDetail):
+    visit_count: int = 0
+    order_count: int = 0
+    items_sold: int = 0
+    revenue: float = 0.0
+    designer_bonus_paid: float = 0.0
+    platform_fee_paid: float = 0.0
+    effective_bonus_percent: float
+
+
 # ─── Order ───────────────────────────────────────────────────────────────────
+
 
 class OrderBase(BaseModel):
     product_id: int
-    blogger_id: int
+    designer_id: int
     quantity: int
     price_per_item: float
     client_phone: str
@@ -223,6 +256,16 @@ class OrderCreate(OrderBase):
     is_manual: bool = False
 
 
+class DesignerManualOrderCreate(BaseModel):
+    product_id: int
+    quantity: int
+    price_per_item: float
+    client_phone: str
+    client_name: Optional[str] = None
+    note: Optional[str] = None
+    attachment_url: Optional[str] = None
+
+
 class OrderUpdate(BaseModel):
     client_phone: Optional[str] = None
     client_name: Optional[str] = None
@@ -233,7 +276,10 @@ class OrderUpdate(BaseModel):
 class Order(OrderBase):
     id: int
     affiliate_link_id: Optional[int] = None
-    commission_amount: float
+    line_revenue: float
+    designer_bonus_amount: float
+    platform_fee_amount: float
+    attachment_url: Optional[str] = None
     is_manual: bool
     status: OrderStatus
     created_at: datetime
@@ -245,7 +291,7 @@ class Order(OrderBase):
 
 class OrderWithDetails(Order):
     product: Optional[Product] = None
-    blogger: Optional[Blogger] = None
+    designer: Optional[Designer] = None
 
     class Config:
         from_attributes = True
@@ -253,34 +299,40 @@ class OrderWithDetails(Order):
 
 # ─── Analytics ───────────────────────────────────────────────────────────────
 
-class AnalyticsBase(BaseModel):
+
+class AffiliateVisitRequest(BaseModel):
+    code: str
+
+
+class Analytics(BaseModel):
+    id: int
+    affiliate_link_id: int
     product_id: int
-    blogger_id: int
+    company_id: int
+    designer_id: int
     visit_count: int = 0
     order_count: int = 0
     items_sold: int = 0
     revenue: float = 0.0
-    commission_paid: float = 0.0
-
-
-class Analytics(AnalyticsBase):
-    id: int
+    designer_bonus_paid: float = 0.0
+    platform_fee_paid: float = 0.0
     created_at: datetime
     updated_at: Optional[datetime] = None
-    blogger: Optional[Blogger] = None
+    designer: Optional[Designer] = None
     product: Optional[Product] = None
 
     class Config:
         from_attributes = True
 
 
-class BloggerRanking(BaseModel):
-    blogger: Blogger
+class DesignerRanking(BaseModel):
+    designer: Designer
     total_visits: int
     total_orders: int
     total_items_sold: int
     total_revenue: float
-    total_commission: float
+    total_designer_bonus: float
+    total_platform_fee: float
     conversion_rate: float
 
 
@@ -289,18 +341,58 @@ class AnalyticsDashboard(BaseModel):
     total_orders: int
     total_items_sold: int
     total_revenue: float
-    total_commission_paid: float
-    blogger_rankings: List[BloggerRanking]
-    per_product: List[Analytics]
+    total_designer_bonus: float
+    total_platform_fee: float
+    designer_rankings: List[DesignerRanking]
+    per_link: List[Analytics]
+
+
+class CompanyProductAnalyticsRow(BaseModel):
+    product_id: int
+    product_name: str
+    items_sold: int
+    revenue: float
+    designer_bonus: float
+    platform_fee: float
+
+
+class CompanyProductDesignerBreakdownRow(BaseModel):
+    designer_id: int
+    designer_name: str
+    designer_email: str
+    items_sold: int
+    revenue: float
+    designer_bonus: float
+    platform_fee: float
+
+
+class CompanyDesignerAnalyticsRow(BaseModel):
+    designer_id: int
+    designer_name: str
+    designer_email: str
+    items_sold: int
+    revenue: float
+    designer_bonus: float
+    platform_fee: float
+
+
+class CompanyDesignerProductBreakdownRow(BaseModel):
+    product_id: int
+    product_name: str
+    items_sold: int
+    revenue: float
+    designer_bonus: float
+    platform_fee: float
 
 
 # ─── Auth / Token ─────────────────────────────────────────────────────────────
+
 
 class Token(BaseModel):
     access_token: str
     token_type: str
     company_id: Optional[int] = None
-    blogger_id: Optional[int] = None
+    designer_id: Optional[int] = None
     admin_id: Optional[int] = None
     email: str
     name: str
@@ -316,6 +408,7 @@ class TelegramLink(BaseModel):
 
 
 # ─── Admin ────────────────────────────────────────────────────────────────────
+
 
 class AdminBase(BaseModel):
     email: EmailStr

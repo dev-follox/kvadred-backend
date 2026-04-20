@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, Tuple, Union, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 import httpx
 from dotenv import load_dotenv
@@ -19,7 +19,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 class OAuthService:
     @staticmethod
     def get_google_authorize_url(
-        state: str, user_type: str = "blogger", redirect_uri: Optional[str] = None
+        state: str, user_type: str = "designer", redirect_uri: Optional[str] = None
     ) -> str:
         if not GOOGLE_CLIENT_ID:
             raise HTTPException(
@@ -90,9 +90,11 @@ class OAuthService:
                 )
             user_info = user_info_response.json()
 
-        user_type = "blogger"
+        user_type = "designer"
         if ":" in state:
             _, user_type = state.split(":", 1)
+        if user_type == "blogger":
+            user_type = "designer"
 
         return {
             "email": user_info.get("email"),
@@ -106,12 +108,14 @@ class OAuthService:
     def get_or_create_user_from_oauth(
         oauth_data: Dict[str, Any],
         db: Session,
-    ) -> Tuple[Union[models.Company, models.Blogger], bool]:
+    ) -> Tuple[Union[models.Company, models.Designer], bool]:
         email = oauth_data["email"]
         provider = oauth_data["provider"]
         provider_id = oauth_data["provider_id"]
         name = oauth_data["name"]
-        user_type = oauth_data.get("user_type", "blogger")
+        user_type = oauth_data.get("user_type", "designer")
+        if user_type == "blogger":
+            user_type = "designer"
 
         if user_type in ("company", "shop"):
             company = db.query(models.Company).filter(
@@ -136,38 +140,40 @@ class OAuthService:
                 hashed_password=None,
                 oauth_provider=provider,
                 oauth_provider_id=provider_id,
+                default_designer_bonus_percent=10.0,
+                subscription_expires_at=None,
             )
             db.add(new_company)
             db.commit()
             db.refresh(new_company)
             return new_company, True
-        else:
-            blogger = db.query(models.Blogger).filter(
-                (models.Blogger.email == email)
-                | (
-                    (models.Blogger.oauth_provider == provider)
-                    & (models.Blogger.oauth_provider_id == provider_id)
-                )
-            ).first()
-            if blogger:
-                if not blogger.oauth_provider:
-                    blogger.oauth_provider = provider
-                    blogger.oauth_provider_id = provider_id
-                    db.commit()
-                    db.refresh(blogger)
-                return blogger, False
 
-            new_blogger = models.Blogger(
-                name=name,
-                email=email,
-                hashed_password=None,
-                oauth_provider=provider,
-                oauth_provider_id=provider_id,
+        designer = db.query(models.Designer).filter(
+            (models.Designer.email == email)
+            | (
+                (models.Designer.oauth_provider == provider)
+                & (models.Designer.oauth_provider_id == provider_id)
             )
-            db.add(new_blogger)
-            db.commit()
-            db.refresh(new_blogger)
-            return new_blogger, True
+        ).first()
+        if designer:
+            if not designer.oauth_provider:
+                designer.oauth_provider = provider
+                designer.oauth_provider_id = provider_id
+                db.commit()
+                db.refresh(designer)
+            return designer, False
+
+        new_designer = models.Designer(
+            name=name,
+            email=email,
+            hashed_password=None,
+            oauth_provider=provider,
+            oauth_provider_id=provider_id,
+        )
+        db.add(new_designer)
+        db.commit()
+        db.refresh(new_designer)
+        return new_designer, True
 
 
 oauth_service = OAuthService()

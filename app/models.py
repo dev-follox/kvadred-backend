@@ -1,6 +1,14 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, ForeignKey,
-    Enum as SQLEnum, DateTime, Text, Boolean, UniqueConstraint,
+    Column,
+    Integer,
+    String,
+    Float,
+    ForeignKey,
+    Enum as SQLEnum,
+    DateTime,
+    Text,
+    Boolean,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -33,12 +41,14 @@ class Company(Base):
     telegram_chat_id = Column(String, nullable=True)
     oauth_provider = Column(String, nullable=True)
     oauth_provider_id = Column(String, nullable=True)
+    default_designer_bonus_percent = Column(Float, nullable=False, default=10.0)
+    subscription_expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     products = relationship("Product", back_populates="company")
-    blogger_invites = relationship("BloggerInvite", back_populates="company")
-    blogger_companies = relationship("BloggerCompany", back_populates="company")
+    designer_invites = relationship("DesignerInvite", back_populates="company")
+    designer_companies = relationship("DesignerCompany", back_populates="company")
 
 
 class Product(Base):
@@ -48,9 +58,8 @@ class Product(Base):
     company_id = Column(Integer, ForeignKey("companies.id"))
     name = Column(String, index=True)
     description = Column(Text, nullable=True)
-    blogger_task_description = Column(Text, nullable=True)
+    designer_task_description = Column(Text, nullable=True)
     price = Column(Float)
-    commission_rate = Column(Float, default=0.0)  # percentage, e.g. 10.0 = 10%
     image_url = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -61,8 +70,8 @@ class Product(Base):
     affiliate_links = relationship("AffiliateLink", back_populates="product")
 
 
-class Blogger(Base):
-    __tablename__ = "bloggers"
+class Designer(Base):
+    __tablename__ = "designers"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
@@ -75,40 +84,39 @@ class Blogger(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    orders = relationship("Order", back_populates="blogger")
-    analytics = relationship("Analytics", back_populates="blogger")
-    affiliate_links = relationship("AffiliateLink", back_populates="blogger")
-    blogger_companies = relationship("BloggerCompany", back_populates="blogger")
+    orders = relationship("Order", back_populates="designer")
+    analytics = relationship("Analytics", back_populates="designer")
+    affiliate_links = relationship("AffiliateLink", back_populates="designer")
+    designer_companies = relationship("DesignerCompany", back_populates="designer")
 
 
-class BloggerInvite(Base):
-    """Invite token sent by a company to a blogger's email."""
-    __tablename__ = "blogger_invites"
+class DesignerInvite(Base):
+    __tablename__ = "designer_invites"
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    blogger_email = Column(String, nullable=False, index=True)
+    designer_email = Column(String, nullable=False, index=True)
     token = Column(String, unique=True, index=True, nullable=False)
     status = Column(SQLEnum(InviteStatus), default=InviteStatus.PENDING)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    company = relationship("Company", back_populates="blogger_invites")
+    company = relationship("Company", back_populates="designer_invites")
 
 
-class BloggerCompany(Base):
-    """Junction table: a blogger can work with many companies."""
-    __tablename__ = "blogger_companies"
+class DesignerCompany(Base):
+    __tablename__ = "designer_companies"
 
     id = Column(Integer, primary_key=True, index=True)
-    blogger_id = Column(Integer, ForeignKey("bloggers.id"), nullable=False)
+    designer_id = Column(Integer, ForeignKey("designers.id"), nullable=False)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    bonus_percent_override = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (UniqueConstraint("blogger_id", "company_id", name="uq_blogger_company"),)
+    __table_args__ = (UniqueConstraint("designer_id", "company_id", name="uq_designer_company"),)
 
-    blogger = relationship("Blogger", back_populates="blogger_companies")
-    company = relationship("Company", back_populates="blogger_companies")
+    designer = relationship("Designer", back_populates="designer_companies")
+    company = relationship("Company", back_populates="designer_companies")
 
 
 class AffiliateLink(Base):
@@ -117,14 +125,17 @@ class AffiliateLink(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String, unique=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"))
-    blogger_id = Column(Integer, ForeignKey("bloggers.id"))
+    designer_id = Column(Integer, ForeignKey("designers.id"))
     click_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    __table_args__ = (UniqueConstraint("designer_id", "product_id", name="uq_affiliate_designer_product"),)
+
     product = relationship("Product", back_populates="affiliate_links")
-    blogger = relationship("Blogger", back_populates="affiliate_links")
+    designer = relationship("Designer", back_populates="affiliate_links")
     orders = relationship("Order", back_populates="affiliate_link")
+    rollup = relationship("Analytics", back_populates="affiliate_link", uselist=False)
 
 
 class Order(Base):
@@ -132,40 +143,49 @@ class Order(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"))
-    blogger_id = Column(Integer, ForeignKey("bloggers.id"))
+    designer_id = Column(Integer, ForeignKey("designers.id"))
     affiliate_link_id = Column(Integer, ForeignKey("affiliate_links.id"), nullable=True)
     quantity = Column(Integer)
     price_per_item = Column(Float)
-    commission_amount = Column(Float, default=0.0)
+    line_revenue = Column(Float, default=0.0)
+    designer_bonus_amount = Column(Float, default=0.0)
+    platform_fee_amount = Column(Float, default=0.0)
     client_phone = Column(String)
     client_name = Column(String, nullable=True)
     note = Column(Text, nullable=True)
+    attachment_url = Column(String, nullable=True)
     is_manual = Column(Boolean, default=False)
     status = Column(SQLEnum(OrderStatus), default=OrderStatus.WAITING)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     product = relationship("Product", back_populates="orders")
-    blogger = relationship("Blogger", back_populates="orders")
+    designer = relationship("Designer", back_populates="orders")
     affiliate_link = relationship("AffiliateLink", back_populates="orders")
 
 
 class Analytics(Base):
+    """Per-affiliate-link rollup (denormalized product/company/designer for filtering)."""
+
     __tablename__ = "analytics"
 
     id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"))
-    blogger_id = Column(Integer, ForeignKey("bloggers.id"))
+    affiliate_link_id = Column(Integer, ForeignKey("affiliate_links.id"), nullable=False, unique=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    designer_id = Column(Integer, ForeignKey("designers.id"), nullable=False)
     visit_count = Column(Integer, default=0)
     order_count = Column(Integer, default=0)
     items_sold = Column(Integer, default=0)
     revenue = Column(Float, default=0.0)
-    commission_paid = Column(Float, default=0.0)
+    designer_bonus_paid = Column(Float, default=0.0)
+    platform_fee_paid = Column(Float, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     product = relationship("Product", back_populates="analytics")
-    blogger = relationship("Blogger", back_populates="analytics")
+    designer = relationship("Designer", back_populates="analytics")
+    affiliate_link = relationship("AffiliateLink", back_populates="rollup")
 
 
 class Admin(Base):

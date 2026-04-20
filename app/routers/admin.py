@@ -19,7 +19,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# ─── Migrations ──────────────────────────────────────────────────────────────
+def _baseline_stamp_if_needed(alembic_cfg: Config) -> None:
+    """
+    If tables already exist (e.g. from SQLAlchemy create_all) but alembic_version is empty,
+    Alembic would try to run 0001 and fail with DuplicateTable. Stamp the revision that matches
+    the current physical schema, then upgrade() only applies later revisions (e.g. 0002).
+    """
+    engine = create_engine(DATABASE_URL)
+    try:
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        if "companies" not in tables:
+            return
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(conn)
+            rev = ctx.get_current_revision()
+        if rev is not None:
+            return
+        if "bloggers" in tables:
+            logger.info("Unversioned DB with legacy 'bloggers' schema — stamping alembic at 0001")
+            command.stamp(alembic_cfg, "0001")
+        elif "designers" in tables:
+            company_cols = {c["name"] for c in insp.get_columns("companies")}
+            if "default_designer_bonus_percent" in company_cols:
+                logger.info(
+                    "Unversioned DB already matches post-refactor schema — stamping alembic at head"
+                )
+                command.stamp(alembic_cfg, "head")
+            else:
+                logger.info("Unversioned DB with 'designers' but pre-refactor companies — stamping 0001")
+                command.stamp(alembic_cfg, "0001")
+        else:
+            logger.warning("Unversioned DB with 'companies' but unknown shape — stamping 0001")
+            command.stamp(alembic_cfg, "0001")
+    finally:
+        engine.dispose()
+
 
 @router.post("/migrate")
 async def run_migrations():
@@ -28,6 +63,8 @@ async def run_migrations():
         alembic_ini_path = str(Path(__file__).parent.parent.parent / "alembic.ini")
         alembic_cfg = Config(alembic_ini_path)
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+
+        _baseline_stamp_if_needed(alembic_cfg)
 
         try:
             command.upgrade(alembic_cfg, "heads")
@@ -48,6 +85,10 @@ async def run_migrations():
                     command.upgrade(alembic_cfg, "heads")
                 else:
                     raise migration_error
+            elif "DuplicateTable" in error_str or "already exists" in error_str.lower():
+                logger.info("Migration hit existing tables — attempting baseline stamp + retry")
+                _baseline_stamp_if_needed(alembic_cfg)
+                command.upgrade(alembic_cfg, "heads")
             else:
                 raise migration_error
 
@@ -100,8 +141,6 @@ async def run_migrations():
         raise HTTPException(status_code=500, detail=f"Migration failed: {e}")
 
 
-# ─── Admin management ─────────────────────────────────────────────────────────
-
 @router.post("/create", response_model=schemas.Admin)
 def create_admin(
     admin: schemas.AdminCreate,
@@ -120,8 +159,6 @@ def create_admin(
     db.refresh(db_admin)
     return db_admin
 
-
-# ─── Companies ────────────────────────────────────────────────────────────────
 
 @router.get("/companies", response_model=List[schemas.Company])
 def list_companies(
@@ -145,6 +182,24 @@ def get_company(
     return company
 
 
+@router.patch("/companies/{company_id}", response_model=schemas.Company)
+def patch_company_subscription(
+    company_id: int,
+    body: schemas.CompanySubscriptionAdminUpdate,
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    company = db.query(models.Company).filter(models.Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(company, k, v)
+    db.commit()
+    db.refresh(company)
+    return company
+
+
 @router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_company(
     company_id: int,
@@ -156,63 +211,83 @@ def delete_company(
         raise HTTPException(status_code=404, detail="Company not found")
     product_ids = [p.id for p in db.query(models.Product).filter(models.Product.company_id == company_id).all()]
     if product_ids:
-        link_ids = [l.id for l in db.query(models.AffiliateLink).filter(models.AffiliateLink.product_id.in_(product_ids)).all()]
+        link_ids = [
+            l.id for l in db.query(models.AffiliateLink).filter(models.AffiliateLink.product_id.in_(product_ids)).all()
+        ]
         if link_ids:
-            db.query(models.Order).filter(models.Order.affiliate_link_id.in_(link_ids)).update({"affiliate_link_id": None}, synchronize_session=False)
+            db.query(models.Analytics).filter(models.Analytics.affiliate_link_id.in_(link_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(models.Order).filter(models.Order.affiliate_link_id.in_(link_ids)).update(
+                {"affiliate_link_id": None}, synchronize_session=False
+            )
         db.query(models.Order).filter(models.Order.product_id.in_(product_ids)).delete(synchronize_session=False)
-        db.query(models.Analytics).filter(models.Analytics.product_id.in_(product_ids)).delete(synchronize_session=False)
-        db.query(models.AffiliateLink).filter(models.AffiliateLink.product_id.in_(product_ids)).delete(synchronize_session=False)
-    db.query(models.BloggerInvite).filter(models.BloggerInvite.company_id == company_id).delete(synchronize_session=False)
-    db.query(models.BloggerCompany).filter(models.BloggerCompany.company_id == company_id).delete(synchronize_session=False)
+        db.query(models.AffiliateLink).filter(models.AffiliateLink.product_id.in_(product_ids)).delete(
+            synchronize_session=False
+        )
+    db.query(models.DesignerInvite).filter(models.DesignerInvite.company_id == company_id).delete(
+        synchronize_session=False
+    )
+    db.query(models.DesignerCompany).filter(models.DesignerCompany.company_id == company_id).delete(
+        synchronize_session=False
+    )
     db.query(models.Product).filter(models.Product.company_id == company_id).delete(synchronize_session=False)
     db.query(models.Company).filter(models.Company.id == company_id).delete(synchronize_session=False)
     db.commit()
     return None
 
 
-# ─── Bloggers ─────────────────────────────────────────────────────────────────
-
-@router.get("/bloggers", response_model=List[schemas.Blogger])
-def list_bloggers(
+@router.get("/designers", response_model=List[schemas.Designer])
+def list_designers(
     skip: int = 0,
     limit: int = 100,
     current_admin: models.Admin = Depends(auth.get_current_admin),
     db: Session = Depends(get_db),
 ):
-    return db.query(models.Blogger).offset(skip).limit(limit).all()
+    return db.query(models.Designer).offset(skip).limit(limit).all()
 
 
-@router.get("/bloggers/{blogger_id}", response_model=schemas.Blogger)
-def get_blogger(
-    blogger_id: int,
+@router.get("/designers/{designer_id}", response_model=schemas.Designer)
+def get_designer(
+    designer_id: int,
     current_admin: models.Admin = Depends(auth.get_current_admin),
     db: Session = Depends(get_db),
 ):
-    blogger = db.query(models.Blogger).filter(models.Blogger.id == blogger_id).first()
-    if not blogger:
-        raise HTTPException(status_code=404, detail="Blogger not found")
-    return blogger
+    designer = db.query(models.Designer).filter(models.Designer.id == designer_id).first()
+    if not designer:
+        raise HTTPException(status_code=404, detail="Designer not found")
+    return designer
 
 
-@router.delete("/bloggers/{blogger_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_blogger(
-    blogger_id: int,
+@router.delete("/designers/{designer_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_designer(
+    designer_id: int,
     current_admin: models.Admin = Depends(auth.get_current_admin),
     db: Session = Depends(get_db),
 ):
-    blogger = db.query(models.Blogger).filter(models.Blogger.id == blogger_id).first()
-    if not blogger:
-        raise HTTPException(status_code=404, detail="Blogger not found")
-    db.query(models.BloggerCompany).filter(models.BloggerCompany.blogger_id == blogger_id).delete(synchronize_session=False)
-    db.query(models.Analytics).filter(models.Analytics.blogger_id == blogger_id).delete(synchronize_session=False)
-    db.query(models.AffiliateLink).filter(models.AffiliateLink.blogger_id == blogger_id).delete(synchronize_session=False)
-    db.query(models.Order).filter(models.Order.blogger_id == blogger_id).delete(synchronize_session=False)
-    db.query(models.Blogger).filter(models.Blogger.id == blogger_id).delete(synchronize_session=False)
+    designer = db.query(models.Designer).filter(models.Designer.id == designer_id).first()
+    if not designer:
+        raise HTTPException(status_code=404, detail="Designer not found")
+    link_ids = [l.id for l in db.query(models.AffiliateLink).filter(models.AffiliateLink.designer_id == designer_id).all()]
+    if link_ids:
+        db.query(models.Analytics).filter(models.Analytics.affiliate_link_id.in_(link_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(models.Order).filter(models.Order.affiliate_link_id.in_(link_ids)).update(
+            {"affiliate_link_id": None}, synchronize_session=False
+        )
+    db.query(models.DesignerCompany).filter(models.DesignerCompany.designer_id == designer_id).delete(
+        synchronize_session=False
+    )
+    db.query(models.Analytics).filter(models.Analytics.designer_id == designer_id).delete(synchronize_session=False)
+    db.query(models.AffiliateLink).filter(models.AffiliateLink.designer_id == designer_id).delete(
+        synchronize_session=False
+    )
+    db.query(models.Order).filter(models.Order.designer_id == designer_id).delete(synchronize_session=False)
+    db.query(models.Designer).filter(models.Designer.id == designer_id).delete(synchronize_session=False)
     db.commit()
     return None
 
-
-# ─── Orders ───────────────────────────────────────────────────────────────────
 
 @router.get("/orders", response_model=List[schemas.Order])
 def list_orders(
@@ -224,8 +299,6 @@ def list_orders(
     return db.query(models.Order).offset(skip).limit(limit).all()
 
 
-# ─── Products ─────────────────────────────────────────────────────────────────
-
 @router.get("/products", response_model=List[schemas.Product])
 def list_products(
     skip: int = 0,
@@ -235,8 +308,6 @@ def list_products(
 ):
     return db.query(models.Product).offset(skip).limit(limit).all()
 
-
-# ─── Analytics ────────────────────────────────────────────────────────────────
 
 @router.get("/analytics", response_model=List[schemas.Analytics])
 def list_analytics(

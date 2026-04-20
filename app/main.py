@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from . import auth, models, schemas
 from .constants import APP_NAME
 from .database import engine, get_db
-from .routers import affiliate_links, analytics, bloggers, companies, orders, products, admin, oauth
+from .routers import affiliate_links, analytics, companies, designers, orders, products, admin, oauth
 from .services.telegram_webhook import telegram_service
 
 logging.basicConfig(
@@ -32,7 +32,7 @@ app.add_middleware(
         "http://localhost:4000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
     expose_headers=["*"],
     max_age=3600,
@@ -41,7 +41,7 @@ app.add_middleware(
 app.include_router(companies.router)
 app.include_router(products.router)
 app.include_router(affiliate_links.router)
-app.include_router(bloggers.router)
+app.include_router(designers.router)
 app.include_router(orders.router)
 app.include_router(analytics.router)
 app.include_router(admin.router)
@@ -62,11 +62,14 @@ async def startup_event():
 
     if telegram_service.bot_token:
         await telegram_service.init_application()
-        success = await telegram_service.set_webhook(webhook_url)
-        if success:
-            logger.info(f"Telegram webhook configured: {webhook_url}")
+        if telegram_service.application:
+            success = await telegram_service.set_webhook(webhook_url)
+            if success:
+                logger.info(f"Telegram webhook configured: {webhook_url}")
+            else:
+                logger.warning("Failed to configure Telegram webhook — bot will be unavailable")
         else:
-            logger.error("Failed to configure Telegram webhook")
+            logger.warning("Telegram bot unavailable — skipping webhook setup")
 
 
 @app.post("/token", response_model=schemas.Token)
@@ -84,28 +87,28 @@ async def login_for_access_token(
             "access_token": access_token,
             "token_type": "bearer",
             "company_id": company.id,
-            "blogger_id": None,
+            "designer_id": None,
             "admin_id": None,
             "email": company.email,
             "name": company.company_name,
             "role": "COMPANY",
         }
 
-    blogger = auth.authenticate_blogger(db, form_data.username, form_data.password)
-    if blogger:
+    designer = auth.authenticate_designer(db, form_data.username, form_data.password)
+    if designer:
         access_token = auth.create_access_token(
-            data={"sub": blogger.email, "role": "BLOGGER", "blogger_id": blogger.id},
+            data={"sub": designer.email, "role": "DESIGNER", "designer_id": designer.id},
             expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
         )
         return {
             "access_token": access_token,
             "token_type": "bearer",
             "company_id": None,
-            "blogger_id": blogger.id,
+            "designer_id": designer.id,
             "admin_id": None,
-            "email": blogger.email,
-            "name": blogger.name,
-            "role": "BLOGGER",
+            "email": designer.email,
+            "name": designer.name,
+            "role": "DESIGNER",
         }
 
     admin_user = auth.authenticate_admin(db, form_data.username, form_data.password)
@@ -118,7 +121,7 @@ async def login_for_access_token(
             "access_token": access_token,
             "token_type": "bearer",
             "company_id": None,
-            "blogger_id": None,
+            "designer_id": None,
             "admin_id": admin_user.id,
             "email": admin_user.email,
             "name": admin_user.name,

@@ -75,13 +75,13 @@ def authenticate_company(db: Session, email: str, password: str):
     return company
 
 
-def authenticate_blogger(db: Session, email: str, password: str):
-    blogger = db.query(models.Blogger).filter(models.Blogger.email == email).first()
-    if not blogger or not blogger.hashed_password:
+def authenticate_designer(db: Session, email: str, password: str):
+    designer = db.query(models.Designer).filter(models.Designer.email == email).first()
+    if not designer or not designer.hashed_password:
         return False
-    if not verify_password(password, blogger.hashed_password):
+    if not verify_password(password, designer.hashed_password):
         return False
-    return blogger
+    return designer
 
 
 def authenticate_admin(db: Session, email: str, password: str):
@@ -124,15 +124,15 @@ async def get_current_company(
     return company
 
 
-async def get_current_blogger(
+async def get_current_designer(
     token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
-) -> models.Blogger:
+) -> models.Designer:
     payload = _decode_token(token)
     email = payload.get("sub")
-    blogger = db.query(models.Blogger).filter(models.Blogger.email == email).first()
-    if blogger is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Blogger not found")
-    return blogger
+    designer = db.query(models.Designer).filter(models.Designer.email == email).first()
+    if designer is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Designer not found")
+    return designer
 
 
 async def get_current_admin(

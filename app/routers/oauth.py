@@ -20,7 +20,6 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 router = APIRouter(prefix="/auth", tags=["oauth"])
 
-# In-memory state store (replace with Redis in production for multi-worker setups)
 state_store: dict = {}
 
 
@@ -28,11 +27,20 @@ class GoogleExchangeRequest(BaseModel):
     code: str
     state: str
     redirect_uri: str
-    user_type: str = "blogger"
+    user_type: str = "designer"
+
+
+def _normalize_user_type(user_type: str) -> str:
+    if user_type in ("blogger", "designer"):
+        return "designer"
+    if user_type in ("company", "shop"):
+        return "company"
+    return user_type
 
 
 @router.get("/google/login")
-async def google_login(user_type: str = "blogger"):
+async def google_login(user_type: str = "designer"):
+    user_type = _normalize_user_type(user_type)
     state = secrets.token_urlsafe(32)
     state_store[state] = True
     try:
@@ -54,7 +62,7 @@ async def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     try:
         oauth_data = await oauth_service.handle_google_callback(code, state, db)
         user, is_new = oauth_service.get_or_create_user_from_oauth(oauth_data, db)
-        user_type = oauth_data.get("user_type", "blogger")
+        user_type = _normalize_user_type(oauth_data.get("user_type", "designer"))
         token_data = _build_token_data(user, user_type, is_new)
 
         frontend_url = FRONTEND_URL.rstrip("/")
@@ -70,7 +78,8 @@ async def google_callback(code: str, state: str, db: Session = Depends(get_db)):
 
 
 @router.get("/google/authorize-url")
-async def get_google_authorize_url(user_type: str = "blogger"):
+async def get_google_authorize_url(user_type: str = "designer"):
+    user_type = _normalize_user_type(user_type)
     state = secrets.token_urlsafe(32)
     state_store[state] = True
     frontend_redirect_uri = f"{FRONTEND_URL.rstrip('/')}/auth/callback"
@@ -101,9 +110,10 @@ async def exchange_google_code(request: GoogleExchangeRequest, db: Session = Dep
             db=db,
             redirect_uri=request.redirect_uri,
         )
-        oauth_data["user_type"] = request.user_type or oauth_data.get("user_type", "blogger")
+        ut = _normalize_user_type(request.user_type or oauth_data.get("user_type", "designer"))
+        oauth_data["user_type"] = ut
         user, is_new = oauth_service.get_or_create_user_from_oauth(oauth_data, db)
-        user_type = request.user_type or oauth_data.get("user_type", "blogger")
+        user_type = ut
         token_data = _build_token_data(user, user_type, is_new)
         return JSONResponse(content=token_data)
     except HTTPException:
@@ -125,26 +135,25 @@ def _build_token_data(user, user_type: str, is_new: bool) -> dict:
             "access_token": access_token,
             "token_type": "bearer",
             "company_id": user.id,
-            "blogger_id": None,
+            "designer_id": None,
             "admin_id": None,
             "email": user.email,
             "name": getattr(user, "company_name", None) or getattr(user, "name", ""),
             "role": "COMPANY",
             "is_new_user": is_new,
         }
-    else:
-        access_token = auth.create_access_token(
-            data={"sub": user.email, "role": "BLOGGER", "blogger_id": user.id},
-            expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
-        )
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "company_id": None,
-            "blogger_id": user.id,
-            "admin_id": None,
-            "email": user.email,
-            "name": user.name,
-            "role": "BLOGGER",
-            "is_new_user": is_new,
-        }
+    access_token = auth.create_access_token(
+        data={"sub": user.email, "role": "DESIGNER", "designer_id": user.id},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "company_id": None,
+        "designer_id": user.id,
+        "admin_id": None,
+        "email": user.email,
+        "name": user.name,
+        "role": "DESIGNER",
+        "is_new_user": is_new,
+    }

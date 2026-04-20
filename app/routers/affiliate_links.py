@@ -1,4 +1,3 @@
-import secrets
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,134 +5,106 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas, auth
 from ..database import get_db
+from ..services import affiliate as affiliate_service
+from ..services.designer_company import effective_designer_bonus_percent
+from ..services.rollup import increment_visit_for_link
+from ..services.subscription import company_subscription_active
 
 router = APIRouter(prefix="/affiliate-links", tags=["affiliate-links"])
 
 
-def generate_unique_code(db: Session) -> str:
-    while True:
-        code = secrets.token_urlsafe(8)
-        if not db.query(models.AffiliateLink).filter(models.AffiliateLink.code == code).first():
-            return code
-
-
 @router.post("/", response_model=schemas.AffiliateLink)
 def create_affiliate_link(
-    link: schemas.AffiliateLinkCreate,
+    body: schemas.AffiliateLinkCreate,
     db: Session = Depends(get_db),
-    current_company: models.Company = Depends(auth.get_current_company),
+    current_designer: models.Designer = Depends(auth.get_current_designer),
 ):
-    product = (
-        db.query(models.Product)
-        .filter(
-            models.Product.id == link.product_id,
-            models.Product.company_id == current_company.id,
-        )
-        .first()
-    )
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found or does not belong to your company")
-
-    blogger = db.query(models.Blogger).filter(models.Blogger.id == link.blogger_id).first()
-    if not blogger:
-        raise HTTPException(status_code=404, detail="Blogger not found")
-
-    existing = (
-        db.query(models.AffiliateLink)
-        .filter(
-            models.AffiliateLink.product_id == link.product_id,
-            models.AffiliateLink.blogger_id == link.blogger_id,
-        )
-        .first()
-    )
-    if existing:
-        return existing
-
-    # Ensure blogger ↔ company association exists
-    bc_exists = (
-        db.query(models.BloggerCompany)
-        .filter(
-            models.BloggerCompany.blogger_id == link.blogger_id,
-            models.BloggerCompany.company_id == current_company.id,
-        )
-        .first()
-    )
-    if not bc_exists:
-        db.add(models.BloggerCompany(blogger_id=link.blogger_id, company_id=current_company.id))
-
-    db_link = models.AffiliateLink(
-        code=generate_unique_code(db),
-        product_id=link.product_id,
-        blogger_id=link.blogger_id,
-    )
-    db.add(db_link)
+    link = affiliate_service.get_or_create_affiliate_link(db, current_designer, body.product_id)
     db.commit()
-    db.refresh(db_link)
-    return db_link
+    db.refresh(link)
+    return link
 
 
-@router.get("/my-links", response_model=List[schemas.AffiliateLinkDetail])
+@router.get("/my-links", response_model=List[schemas.AffiliateLinkWithRollup])
 def get_my_links(
-    current_blogger: models.Blogger = Depends(auth.get_current_blogger),
+    current_designer: models.Designer = Depends(auth.get_current_designer),
     db: Session = Depends(get_db),
 ):
-    """Return all affiliate links for the authenticated blogger."""
-    return (
+    links = (
         db.query(models.AffiliateLink)
-        .filter(models.AffiliateLink.blogger_id == current_blogger.id)
+        .filter(models.AffiliateLink.designer_id == current_designer.id)
         .all()
     )
+    out: List[schemas.AffiliateLinkWithRollup] = []
+    for link in links:
+        product = link.product
+        designer = link.designer
+        rollup = (
+            db.query(models.Analytics)
+            .filter(models.Analytics.affiliate_link_id == link.id)
+            .first()
+        )
+        bonus = effective_designer_bonus_percent(db, current_designer.id, product.company_id)
+        out.append(
+            schemas.AffiliateLinkWithRollup(
+                id=link.id,
+                code=link.code,
+                product_id=link.product_id,
+                designer_id=link.designer_id,
+                click_count=link.click_count or 0,
+                created_at=link.created_at,
+                updated_at=link.updated_at,
+                product=schemas.Product.model_validate(product),
+                designer=schemas.Designer.model_validate(designer),
+                visit_count=rollup.visit_count if rollup else 0,
+                order_count=rollup.order_count if rollup else 0,
+                items_sold=rollup.items_sold if rollup else 0,
+                revenue=rollup.revenue if rollup else 0.0,
+                designer_bonus_paid=rollup.designer_bonus_paid if rollup else 0.0,
+                platform_fee_paid=rollup.platform_fee_paid if rollup else 0.0,
+                effective_bonus_percent=bonus,
+            )
+        )
+    return out
 
 
 @router.get("/{code}", response_model=schemas.AffiliateLinkDetail)
 def get_affiliate_link(code: str, db: Session = Depends(get_db)):
-    """Resolve an affiliate code — also increments click counter."""
     link = db.query(models.AffiliateLink).filter(models.AffiliateLink.code == code).first()
     if not link:
         raise HTTPException(status_code=404, detail="Affiliate link not found")
-
-    link.click_count += 1
-
-    analytics = (
-        db.query(models.Analytics)
-        .filter(
-            models.Analytics.product_id == link.product_id,
-            models.Analytics.blogger_id == link.blogger_id,
-        )
-        .first()
-    )
-    if analytics:
-        analytics.visit_count += 1
-    else:
-        db.add(
-            models.Analytics(
-                product_id=link.product_id,
-                blogger_id=link.blogger_id,
-                visit_count=1,
-            )
-        )
+    product = link.product
+    company = product.company
+    if not company_subscription_active(company):
+        raise HTTPException(status_code=403, detail="Affiliate link is not active")
+    increment_visit_for_link(db, link)
     db.commit()
     db.refresh(link)
     return link
 
 
 @router.delete("/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_affiliate_link(
+def delete_my_affiliate_link(
     link_id: int,
     db: Session = Depends(get_db),
-    current_company: models.Company = Depends(auth.get_current_company),
+    current_designer: models.Designer = Depends(auth.get_current_designer),
 ):
     link = (
         db.query(models.AffiliateLink)
-        .join(models.Product)
         .filter(
             models.AffiliateLink.id == link_id,
-            models.Product.company_id == current_company.id,
+            models.AffiliateLink.designer_id == current_designer.id,
         )
         .first()
     )
     if not link:
         raise HTTPException(status_code=404, detail="Affiliate link not found")
+    db.query(models.Order).filter(models.Order.affiliate_link_id == link.id).update(
+        {"affiliate_link_id": None}, synchronize_session=False
+    )
+    db.query(models.Analytics).filter(models.Analytics.affiliate_link_id == link.id).delete(
+        synchronize_session=False
+    )
     db.delete(link)
     db.commit()
     return None

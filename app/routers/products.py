@@ -1,15 +1,15 @@
 import mimetypes
 import shutil
-import os
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, auth
 from ..database import get_db
+from ..services.subscription import assert_company_can_write
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -24,6 +24,7 @@ def get_products(
     db: Session = Depends(get_db),
     current_company: models.Company = Depends(auth.get_current_company),
 ):
+    assert_company_can_write(current_company)
     return (
         db.query(models.Product)
         .filter(models.Product.company_id == current_company.id)
@@ -34,14 +35,13 @@ def get_products(
 
 
 @router.get("/for-me", response_model=List[schemas.Product])
-def get_products_for_blogger(
+def get_products_for_designer(
     db: Session = Depends(get_db),
-    current_blogger: models.Blogger = Depends(auth.get_current_blogger),
+    current_designer: models.Designer = Depends(auth.get_current_designer),
 ):
-    """Products accessible to the current blogger via their affiliate links."""
     links = (
         db.query(models.AffiliateLink)
-        .filter(models.AffiliateLink.blogger_id == current_blogger.id)
+        .filter(models.AffiliateLink.designer_id == current_designer.id)
         .all()
     )
     product_ids = [l.product_id for l in links]
@@ -51,15 +51,14 @@ def get_products_for_blogger(
 
 
 @router.get("/for-me/detailed")
-def get_products_for_blogger_detailed(
+def get_products_for_designer_detailed(
     db: Session = Depends(get_db),
-    current_blogger: models.Blogger = Depends(auth.get_current_blogger),
+    current_designer: models.Designer = Depends(auth.get_current_designer),
 ):
-    """Products for blogger with affiliate code and commission rate included."""
     results = (
         db.query(models.Product, models.AffiliateLink.code, models.AffiliateLink.click_count)
         .join(models.AffiliateLink, models.AffiliateLink.product_id == models.Product.id)
-        .filter(models.AffiliateLink.blogger_id == current_blogger.id)
+        .filter(models.AffiliateLink.designer_id == current_designer.id)
         .all()
     )
     return [
@@ -69,9 +68,8 @@ def get_products_for_blogger_detailed(
             "name": p.name,
             "description": p.description,
             "price": p.price,
-            "commission_rate": p.commission_rate,
             "image_url": p.image_url,
-            "blogger_task_description": p.blogger_task_description,
+            "designer_task_description": p.designer_task_description,
             "affiliate_code": code,
             "click_count": click_count,
         }
@@ -85,7 +83,11 @@ async def get_product_image(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
     content_type, _ = mimetypes.guess_type(filename)
-    return FileResponse(path=file_path, media_type=content_type or "application/octet-stream", filename=filename)
+    return FileResponse(
+        path=file_path,
+        media_type=content_type or "application/octet-stream",
+        filename=filename,
+    )
 
 
 @router.post("/upload-image")
@@ -93,6 +95,7 @@ async def upload_product_image(
     image: UploadFile = File(...),
     current_company: models.Company = Depends(auth.get_current_company),
 ):
+    assert_company_can_write(current_company)
     if not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
     filename = f"{current_company.id}_{image.filename}"
@@ -108,27 +111,11 @@ async def upload_product_image(
 @router.get("/{product_id}", response_model=schemas.Product)
 def get_product(
     product_id: int,
-    blogger_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    if blogger_id:
-        analytics = (
-            db.query(models.Analytics)
-            .filter(
-                models.Analytics.product_id == product_id,
-                models.Analytics.blogger_id == blogger_id,
-            )
-            .first()
-        )
-        if analytics:
-            analytics.visit_count += 1
-        else:
-            analytics = models.Analytics(product_id=product_id, blogger_id=blogger_id, visit_count=1)
-            db.add(analytics)
-        db.commit()
     return product
 
 
@@ -138,6 +125,7 @@ def create_product(
     db: Session = Depends(get_db),
     current_company: models.Company = Depends(auth.get_current_company),
 ):
+    assert_company_can_write(current_company)
     if product.company_id != current_company.id:
         raise HTTPException(status_code=403, detail="Not authorized to create product for this company")
     db_product = models.Product(**product.model_dump())
@@ -154,6 +142,7 @@ def update_product(
     db: Session = Depends(get_db),
     current_company: models.Company = Depends(auth.get_current_company),
 ):
+    assert_company_can_write(current_company)
     db_product = (
         db.query(models.Product)
         .filter(models.Product.id == product_id, models.Product.company_id == current_company.id)
@@ -174,6 +163,7 @@ def delete_product(
     db: Session = Depends(get_db),
     current_company: models.Company = Depends(auth.get_current_company),
 ):
+    assert_company_can_write(current_company)
     db_product = (
         db.query(models.Product)
         .filter(models.Product.id == product_id, models.Product.company_id == current_company.id)
@@ -217,7 +207,6 @@ def get_product_analytics(
         raise HTTPException(status_code=404, detail="Product not found")
     return (
         db.query(models.Analytics)
-        .join(models.Blogger)
         .filter(models.Analytics.product_id == product_id)
         .all()
     )

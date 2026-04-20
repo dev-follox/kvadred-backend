@@ -26,7 +26,12 @@ class TelegramWebhookService:
 
     async def init_application(self):
         if self.application:
-            await self.application.initialize()
+            try:
+                await self.application.initialize()
+            except Exception as e:
+                logger.warning(f"Telegram bot initialization failed (network issue?): {e}")
+                self.application = None
+                self.bot = None
 
     def setup_routes(self):
         @self.router.post("/webhook")
